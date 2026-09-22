@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request: ~
+  workflow_dispatch: ~
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  PHP_VERSION: '8.3'
+
+jobs:
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: ctype, iconv
+          coverage: pcov
+          ini-values: memory_limit=-1
+
+      - name: Install Composer dependencies
+        uses: ramsey/composer-install@a8d0d959dab41457692a5e2041bd9b757a119e3f # 3.2.1
+
+      - name: Run test suite with 100% coverage
+        run: |
+          set -o pipefail
+          # The XML coverage and JUnit log are reused by Infection below.
+          vendor/bin/phpunit --colors=never \
+            --coverage-text --only-summary-for-coverage-text \
+            --coverage-xml=build/coverage/coverage-xml \
+            --log-junit=build/coverage/junit.xml \
+            | tee coverage_summary.txt
+          grep -E "Lines:\s+100\.00%" coverage_summary.txt
+
+      - name: Run Infection mutation tests
+        run: vendor/bin/infection --threads=max --coverage=build/coverage --skip-initial-tests --no-progress --show-mutations
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: ctype, iconv
+          coverage: none
+          ini-values: memory_limit=-1
+
+      - name: Install Composer dependencies
+        uses: ramsey/composer-install@a8d0d959dab41457692a5e2041bd9b757a119e3f # 3.2.1
+
+      - name: Composer validate
+        run: composer validate --strict --no-check-publish
+
+      - name: Composer audit
+        run: composer audit
+
+      - name: PHP-CS-Fixer
+        run: vendor/bin/php-cs-fixer check --diff
+
+      - name: PHPStan
+        run: vendor/bin/phpstan analyse --no-progress --error-format=github --memory-limit=1G
+
+      - name: Rector
+        run: vendor/bin/rector process --dry-run --no-progress-bar --memory-limit=1G
+
+      - name: Lint YAML
+        run: php bin/console lint:yaml config/ --parse-tags --env=prod
+
+      - name: Lint container
+        run: php bin/console lint:container --no-debug --env=prod

@@ -1,0 +1,25 @@
+parameters:
+    level: max
+
+    paths:
+        - bin/
+        - config/
+        - src/
+        - tests/
+    excludePaths:
+        - tests/bootstrap.php
+
+    symfony:
+        consoleApplicationLoader: tools/phpstan/console-application.php
+
+    checkTooWideReturnTypesInProtectedAndPublicMethods: true
+    checkUninitializedProperties: true
+    checkImplicitMixed: true
+    checkBenevolentUnionTypes: true
+    checkMissingOverrideMethodAttribute: true
+    exceptions:
+        check:
+            missingCheckedExceptionInThrows: true
+            tooWideThrowType: true
+
+    resultCachePath: var/phpstan

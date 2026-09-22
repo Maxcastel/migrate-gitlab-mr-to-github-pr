@@ -1,0 +1,25 @@
+{
+    "$schema": "vendor/infection/infection/resources/schema.json",
+    "source": {
+        "directories": ["src"]
+    },
+    "tmpDir": "var/infection9",
+    "timeout": 30,
+    "maxTimeouts": 0,
+    "timeoutsAsEscaped": true,
+    "logs": {
+        "text": "var/infection/infection.log",
+        "html": "var/infection/infection.html",
+        "summary": "var/infection/summary.log",
+        "json": "var/infection/infection.json"
+    },
+    "testFramework":"phpunit",
+    "staticAnalysisTool":"phpstan",
+    "staticAnalysisToolOptions": "--memory-limit=1G",
+    "minMsi": 100,
+    "minCoveredMsi": 100,
+    "ignoreMsiWithNoMutations": true,
+    "mutators": {
+        "@default": true
+    }
+}
