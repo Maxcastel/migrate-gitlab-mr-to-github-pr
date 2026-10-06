@@ -433,7 +433,9 @@ class GitHubService
             ? $this->lastMergeShaForMain
             : $baseBeforeMerge;
 
-        $this->rebuiltCommits[$baseBeforeMerge] = $mainBase;
+        if ($isMerged || $baseBeforeMerge === $this->lastReplayedGitLabMainSha) {
+            $this->rebuiltCommits[$baseBeforeMerge] = $mainBase;
+        }
 
         $this->rebaseFeatureBranchOnto($branchToUse, $baseBeforeMerge, $mainBase);
 
@@ -535,7 +537,8 @@ class GitHubService
      *
      * Each original commit's tree, message, author and committer are preserved;
      * only the parent chain (and therefore the SHA) changes. After the rebase,
-     * $branchName points to the last rebased commit.
+     * $branchName points to the last rebased commit, and each copy is recorded so
+     * a branch created from one of these commits is replayed on that copy.
      *
      * @throws GitHubApiException
      */
@@ -551,6 +554,7 @@ class GitHubService
         $previousSha = $base;
         foreach ($compare->commits as $commit) {
             $previousSha = $this->recreateCommitOnParent($commit, $previousSha)->sha;
+            $this->rebuiltCommits[$commit->sha] = $previousSha;
         }
 
         if ($previousSha !== $base) {

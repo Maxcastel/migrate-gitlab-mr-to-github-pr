@@ -2058,6 +2058,339 @@ final class GitHubServiceTest extends TestCase
      * @throws DateInvalidTimeZoneException
      * @throws LogicException
      */
+    public function testOpenMergeRequestsLeftBehindByANewerMergeStayOnTheCopyOfTheirBase(): void
+    {
+        ServiceMockHelper::setPrivateProperty(
+            $this->service, 'lastReplayedGitLabMainSha', 'previous-gitlab-merge'
+        );
+        ServiceMockHelper::setPrivateProperty(
+            $this->service, 'lastMergeShaForMain', 'previous-github-merge'
+        );
+
+        $this->api->method('branchExists')->willReturn(true);
+        $this->api->method('showCommit')->willReturn(new GitCommit(
+            new ShaRef('ci-merge-tree'),
+            [new ShaRef('gitlab-release'), new ShaRef('ci-tip')],
+            new GitCommitAuthor('A', 'a@a'),
+        ));
+
+        $identity = ['name' => 'A', 'email' => 'a@a', 'date' => '2025-09-18T10:00:00Z'];
+        $this->api->method('compareCommits')->willReturnCallback(
+            static function (string $base, string $head) use ($identity): CommitComparison {
+                if ('previous-gitlab-merge' === $base) {
+                    return new CommitComparison([
+                        new RepoCommit(
+                            'gitlab-release',
+                            new RepoCommitDetail('chore(release): v0.11.0', new ShaRef('release-tree'), $identity, $identity),
+                            [new ShaRef('previous-gitlab-merge')],
+                        ),
+                    ]);
+                }
+
+                if ('gitlab-release' === $base) {
+                    return new CommitComparison([
+                        new RepoCommit(
+                            $head.'-tip',
+                            new RepoCommitDetail('commit of '.$head, new ShaRef($head.'-tree'), $identity, $identity),
+                            null,
+                        ),
+                    ], new ShaRef('gitlab-release'));
+                }
+
+                return new CommitComparison([]);
+            }
+        );
+
+        $refs = [];
+        $this->api->method('forceUpdateBranch')->willReturnCallback(
+            static function (string $branch, string $sha) use (&$refs): void {
+                $refs[$branch] = $sha;
+            }
+        );
+        $this->api->method('getBranch')->willReturnCallback(
+            static function (string $branch) use (&$refs): BranchInfo {
+                return new BranchInfo($branch, new ShaRef($refs[$branch] ?? 'unknown'));
+            }
+        );
+
+        $createdCommits = [];
+        $this->api->method('createCommit')->willReturnCallback(
+            static function (array $params) use (&$createdCommits): CreatedCommit {
+                $createdCommits[] = $params;
+
+                return new CreatedCommit('created-'.\count($createdCommits));
+            }
+        );
+
+        $this->api->method('createPullRequest')->willReturn(new CreatedPullRequest(37, new ShaRef('h')));
+
+        $this->service->importMergeRequest(new MergeRequest(
+            gitLabIid: 37,
+            sourceBranch: 'ci-add-tests',
+            targetBranch: 'main',
+            state: MergeRequestState::Merged,
+            mergedAt: strtotime('2026-10-04T15:00:00Z'),
+            mergeCommitSha: 'gitlab-ci-merge',
+        ));
+        $openBranches = ['add-tab-ripple', 'account-screen-as-tab', 'fix-upgrade-expo-sdk-from-53-to-54'];
+        foreach ($openBranches as $index => $branch) {
+            $this->service->importMergeRequest(new MergeRequest(
+                gitLabIid: 27 + $index,
+                sourceBranch: $branch,
+                targetBranch: 'main',
+                state: MergeRequestState::Opened,
+                baseSha: 'gitlab-release',
+            ));
+        }
+
+        self::assertCount(6, $createdCommits, 'Replayed release + ci-add-tests commit + its merge + one commit per open MR');
+        self::assertSame('chore(release): v0.11.0', $createdCommits[0]['message']);
+        self::assertSame('Merge pull request #37 from Maxcastel/ci-add-tests', $createdCommits[2]['message']);
+
+        foreach ($openBranches as $index => $branch) {
+            $openMrCommit = $createdCommits[3 + $index];
+            self::assertSame('commit of '.$branch, $openMrCommit['message']);
+            self::assertSame(
+                ['created-1'],
+                $openMrCommit['parents'],
+                'The MR was opened on v0.11.0: stacking it on the merge of ci-add-tests would revert that merge in the '
+                .'PR diff and hide the conflicts GitLab reports'
+            );
+            self::assertSame('created-'.(4 + $index), $refs[$branch], 'The PR branch must point to its rebuilt commit');
+        }
+
+        self::assertSame('created-3', $refs['main'], 'main must stay on the merge of ci-add-tests');
+    }
+
+    /**
+     * @throws ImportException
+     * @throws DateMalformedStringException
+     * @throws InvalidArgumentException
+     * @throws ReflectionException
+     * @throws DateInvalidTimeZoneException
+     * @throws LogicException
+     */
+    public function testOpenMergeRequestOpenedBeforeTheReplayedHistoryKeepsItsOriginalBase(): void
+    {
+        ServiceMockHelper::setPrivateProperty(
+            $this->service, 'lastReplayedGitLabMainSha', 'gitlab-merge'
+        );
+        ServiceMockHelper::setPrivateProperty(
+            $this->service, 'lastMergeShaForMain', 'github-merge'
+        );
+
+        $this->api->method('branchExists')->willReturn(true);
+
+        $identity = ['name' => 'A', 'email' => 'a@a', 'date' => '2025-06-15T10:00:00Z'];
+        $this->api->method('compareCommits')->willReturnCallback(
+            static fn (string $base, string $head): CommitComparison => 'old-mr' === $head
+                ? new CommitComparison([
+                    new RepoCommit(
+                        'old-mr-tip',
+                        new RepoCommitDetail('feat: old open MR', new ShaRef('old-mr-tree'), $identity, $identity),
+                        [new ShaRef('gitlab-init')],
+                    ),
+                ], new ShaRef('gitlab-init'))
+                : new CommitComparison([], new ShaRef($head))
+        );
+
+        $refUpdates = [];
+        $this->api->method('forceUpdateBranch')->willReturnCallback(
+            static function (string $branch, string $sha) use (&$refUpdates): void {
+                $refUpdates[] = ['branch' => $branch, 'sha' => $sha];
+            }
+        );
+
+        $createdCommits = [];
+        $this->api->method('createCommit')->willReturnCallback(
+            static function (array $params) use (&$createdCommits): CreatedCommit {
+                $createdCommits[] = $params;
+
+                return new CreatedCommit('created-'.\count($createdCommits));
+            }
+        );
+
+        $this->api->method('createPullRequest')->willReturn(new CreatedPullRequest(5, new ShaRef('h')));
+
+        $this->service->importMergeRequest(new MergeRequest(
+            gitLabIid: 5,
+            sourceBranch: 'old-mr',
+            targetBranch: 'main',
+            state: MergeRequestState::Opened,
+            baseSha: 'gitlab-init',
+        ));
+
+        self::assertCount(1, $createdCommits);
+        self::assertSame(
+            ['gitlab-init'],
+            $createdCommits[0]['parents'],
+            'The MR was opened before the first replayed merge, where GitLab and GitHub histories are still the same: '
+            .'it must stay there, not be stacked on the replayed main'
+        );
+        self::assertSame([
+            ['branch' => 'old-mr', 'sha' => 'created-1'],
+            ['branch' => 'main', 'sha' => 'github-merge'],
+            ['branch' => 'main', 'sha' => 'github-merge'],
+        ], $refUpdates);
+    }
+
+    /**
+     * @throws ImportException
+     * @throws DateMalformedStringException
+     * @throws InvalidArgumentException
+     * @throws ReflectionException
+     * @throws DateInvalidTimeZoneException
+     * @throws LogicException
+     */
+    public function testOpenMergeRequestBasedOnAMergeMadeOutsideMergeRequestsSitsOnTheReplayedMain(): void
+    {
+        ServiceMockHelper::setPrivateProperty(
+            $this->service, 'lastReplayedGitLabMainSha', 'previous-gitlab-merge'
+        );
+        ServiceMockHelper::setPrivateProperty(
+            $this->service, 'lastMergeShaForMain', 'previous-github-merge'
+        );
+
+        $this->api->method('branchExists')->willReturn(true);
+
+        $identity = ['name' => 'A', 'email' => 'a@a', 'date' => '2025-09-18T10:00:00Z'];
+        $this->api->method('compareCommits')->willReturnCallback(
+            static function (string $base) use ($identity): CommitComparison {
+                if ('previous-gitlab-merge' === $base) {
+                    return new CommitComparison([
+                        new RepoCommit(
+                            'hotfix',
+                            new RepoCommitDetail('fix: hotfix', new ShaRef('hotfix-tree'), $identity, $identity),
+                            [new ShaRef('previous-gitlab-merge')],
+                        ),
+                        new RepoCommit(
+                            'gitlab-local-merge',
+                            new RepoCommitDetail("Merge branch 'hotfix'", new ShaRef('local-merge-tree'), $identity, $identity),
+                            [new ShaRef('previous-gitlab-merge'), new ShaRef('hotfix')],
+                        ),
+                    ]);
+                }
+
+                return new CommitComparison([
+                    new RepoCommit(
+                        'feat-tip',
+                        new RepoCommitDetail('feat: add feature', new ShaRef('feat-tree'), $identity, $identity),
+                        null,
+                    ),
+                ], new ShaRef('gitlab-local-merge'));
+            }
+        );
+
+        $createdCommits = [];
+        $this->api->method('createCommit')->willReturnCallback(
+            static function (array $params) use (&$createdCommits): CreatedCommit {
+                $createdCommits[] = $params;
+
+                return new CreatedCommit('created-'.\count($createdCommits));
+            }
+        );
+
+        $this->api->method('createPullRequest')->willReturn(new CreatedPullRequest(1, new ShaRef('h')));
+
+        $this->service->importMergeRequest(new MergeRequest(
+            gitLabIid: 1,
+            sourceBranch: 'feat',
+            targetBranch: 'main',
+            state: MergeRequestState::Opened,
+            baseSha: 'gitlab-local-merge',
+        ));
+
+        self::assertCount(2, $createdCommits);
+        self::assertSame('feat: add feature', $createdCommits[1]['message']);
+        self::assertSame(
+            ['created-1'],
+            $createdCommits[1]['parents'],
+            'The skipped merge commit has no copy of its own: the MR, up to date with GitLab main, must sit on the replayed main'
+        );
+    }
+
+    /**
+     * @throws ImportException
+     * @throws DateMalformedStringException
+     * @throws DateInvalidTimeZoneException
+     * @throws LogicException
+     */
+    public function testOpenMergeRequestBranchedOffAMergedBranchSitsOnTheCopyOfItsBaseCommit(): void
+    {
+        $this->api->method('branchExists')->willReturn(true);
+        $this->api->method('getBranch')->willReturn(new BranchInfo('main', new ShaRef('gitlab-main')));
+        $this->api->method('showCommit')->willReturn(new GitCommit(
+            new ShaRef('merge-tree'),
+            [new ShaRef('gitlab-main'), new ShaRef('feature-commit')],
+            new GitCommitAuthor('A', 'a@a'),
+        ));
+
+        $identity = ['name' => 'A', 'email' => 'a@a', 'date' => '2025-06-05T10:00:00Z'];
+        $this->api->method('compareCommits')->willReturnCallback(
+            static fn (string $base): CommitComparison => match ($base) {
+                'gitlab-main' => new CommitComparison([
+                    new RepoCommit(
+                        'feature-commit',
+                        new RepoCommitDetail('feat: add feature', new ShaRef('feature-tree'), $identity, $identity),
+                        null,
+                    ),
+                ], new ShaRef('gitlab-main')),
+                'feature-commit' => new CommitComparison([
+                    new RepoCommit(
+                        'stacked-commit',
+                        new RepoCommitDetail('feat: render feature', new ShaRef('stacked-tree'), $identity, $identity),
+                        null,
+                    ),
+                ], new ShaRef('feature-commit')),
+                default => new CommitComparison([]),
+            }
+        );
+
+        $createdCommits = [];
+        $this->api->method('createCommit')->willReturnCallback(
+            static function (array $params) use (&$createdCommits): CreatedCommit {
+                $createdCommits[] = $params;
+
+                return new CreatedCommit('created-'.\count($createdCommits));
+            }
+        );
+
+        $this->api->method('createPullRequest')->willReturn(new CreatedPullRequest(1, new ShaRef('h')));
+
+        $this->service->importMergeRequest(new MergeRequest(
+            gitLabIid: 1,
+            sourceBranch: 'feat',
+            targetBranch: 'main',
+            state: MergeRequestState::Merged,
+            mergedAt: strtotime('2025-06-06T10:00:00Z'),
+            mergeCommitSha: 'gitlab-merge',
+        ));
+        $this->service->importMergeRequest(new MergeRequest(
+            gitLabIid: 2,
+            sourceBranch: 'stacked',
+            targetBranch: 'main',
+            state: MergeRequestState::Opened,
+            baseSha: 'feature-commit',
+        ));
+
+        self::assertCount(3, $createdCommits, 'Merged MR commit + its merge + the open MR commit');
+        self::assertSame('feat: render feature', $createdCommits[2]['message']);
+        self::assertSame(
+            ['created-1'],
+            $createdCommits[2]['parents'],
+            'The MR branched off the merged branch: it must sit on the copy of that commit, otherwise its PR shows the '
+            .'original commit again and conflicts with it'
+        );
+    }
+
+    /**
+     * @throws ImportException
+     * @throws DateMalformedStringException
+     * @throws InvalidArgumentException
+     * @throws ReflectionException
+     * @throws DateInvalidTimeZoneException
+     * @throws LogicException
+     */
     public function testNoCherryPickWhenTheMergeRequestBaseIsAlreadyTheLastReplayedCommit(): void
     {
         ServiceMockHelper::setPrivateProperty(
